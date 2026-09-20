@@ -598,6 +598,79 @@ def analyse_shopify(root, timeline, findings):
     })
 
 
+# Published retention for each platform's audit trail, in days.
+# (directory, human name, days, what the limit applies to)
+RETENTION = [
+    ("facebook", "Meta business activity log", 90,
+     "the business activity log"),
+    ("google", "Google Workspace audit logs", 180,
+     "admin, login, Drive and token logs"),
+    ("shopify", "Shopify Event API", 365,
+     "product, order, page, blog and price rule history"),
+    ("gcp", "GCP Admin Activity (_Required bucket)", 400,
+     "admin activity audit logs"),
+]
+
+
+def analyse_retention(root, handover, findings):
+    """Compare the handover date against each platform's retention window.
+
+    Without this, a platform whose log no longer reaches back to the handover
+    simply returns fewer rows - which reads identically to "nothing happened
+    in that period". That is the single most dangerous misreading of an audit
+    like this, so it is stated explicitly instead.
+    """
+    if not handover:
+        return
+    try:
+        handover_date = datetime.strptime(handover, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        log("could not parse --handover %r as YYYY-MM-DD; skipping retention check" % handover)
+        return
+
+    for subdir, name, days, covers in RETENTION:
+        d = os.path.join(root, subdir)
+        if not os.path.isdir(d):
+            continue
+        meta = load(os.path.join(d, "_collection_metadata.json"), {}) or {}
+        collected = meta.get("collected_at")
+        try:
+            when = datetime.strptime(collected, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            when = datetime.now(timezone.utc)
+        boundary = when - timedelta(days=days)
+        if boundary > handover_date:
+            lost = (boundary - handover_date).days
+            findings.append({
+                "severity": "high", "platform": subdir,
+                "title": "%s does not reach back to the handover - %d day(s) unavailable"
+                         % (name, lost),
+                "detail": "Handover was %s. %s retains %d days, so at collection time it only "
+                          "reached back to %s. The first %d day(s) after the handover were "
+                          "already beyond retention and could not be collected - by anyone, "
+                          "including Meta or Google support."
+                          % (handover, name, days, boundary.date(), lost),
+                "recommendation": "Treat the absence of events in that period as unknown, not "
+                                  "as evidence that nothing happened. This gap widens by one "
+                                  "day per day, so anything still inside the window should be "
+                                  "exported now.",
+                "evidence": "%s/_collection_metadata.json" % subdir,
+            })
+        else:
+            margin = (handover_date - boundary).days
+            closes = handover_date + timedelta(days=days)
+            findings.append({
+                "severity": "info", "platform": subdir,
+                "title": "%s covers the handover (%d day(s) of margin)" % (name, margin),
+                "detail": "Handover was %s. %s retains %d days and covers %s, so the export "
+                          "includes %s for the whole period since the handover. This window "
+                          "closes on %s." % (handover, name, days, covers, covers, closes.date()),
+                "recommendation": "No action needed, but the export is the only durable copy "
+                                  "after %s." % closes.date(),
+                "evidence": "%s/_collection_metadata.json" % subdir,
+            })
+
+
 def normalise_ts(value):
     """Return one sortable UTC ISO string from the shapes the sources emit.
 
@@ -774,6 +847,7 @@ def main(argv=None):
     analyse_gcp(args.dir, timeline, findings)
     analyse_facebook(args.dir, timeline, findings)
     analyse_shopify(args.dir, timeline, findings)
+    analyse_retention(args.dir, args.handover, findings)
 
     for row in timeline:
         row["timestamp"] = normalise_ts(row["timestamp"])
