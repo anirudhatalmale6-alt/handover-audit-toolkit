@@ -202,6 +202,55 @@ def main(root):
         {"asset_type": "owned_ad_accounts", "asset_id": "act_555", "asset_name": "Acme Main",
          "user_id": "88888", "user_name": "Unknown Identity", "tasks": ["MANAGE", "ADVERTISE"]},
     ])
+    # Shopify. Event records use `verb` + `subject_type` and carry `author`
+    # as a display name only - there is no email on a Shopify event, which is
+    # why the timeline cannot join it to a Google actor automatically.
+    sh = os.path.join(root, "shopify")
+    def ev(days_ago, verb, subject_type, subject_id, author, message):
+        return {"id": abs(hash(message)) % 10**9, "subject_id": subject_id,
+                "subject_type": subject_type, "verb": verb, "author": author,
+                "message": message,
+                "created_at": (now - timedelta(days=days_ago)).strftime(
+                    "%Y-%m-%dT%H:%M:%S+00:00")}
+
+    w(os.path.join(sh, "events.json"), [
+        ev(3, "destroy", "Product", 7001, "Old Partner", "Product was deleted"),
+        ev(4, "update", "Product", 7002, "Old Partner", "Product was updated"),
+        ev(5, "destroy", "Page", 8001, "Old Partner", "Page was deleted"),
+        ev(9, "cancel", "Order", 9001, "Old Partner", "Order was cancelled"),
+        ev(25, "create", "Product", 7003, "New Owner", "Product was created"),
+    ])
+    w(os.path.join(sh, "events_deletions.json"), [
+        dict(ev(3, "destroy", "Product", 7001, "Old Partner", "Product was deleted"),
+             _resource="Product"),
+        dict(ev(5, "destroy", "Page", 8001, "Old Partner", "Page was deleted"),
+             _resource="Page"),
+    ])
+    w(os.path.join(sh, "webhooks.json"), [
+        {"id": 1, "topic": "orders/create", "address": "https://hooks.partner-personal.net/orders",
+         "format": "json", "created_at": t(40)},
+        {"id": 2, "topic": "app/uninstalled", "address": "https://shopifyapp.example.com/hook",
+         "format": "json", "created_at": t(200)},
+    ])
+    w(os.path.join(sh, "script_tags.json"), [
+        {"id": 5, "src": "https://cdn.partner-personal.net/track.js",
+         "display_scope": "all", "created_at": t(38)},
+    ])
+    w(os.path.join(sh, "staff_users.json"), [])
+    w(os.path.join(sh, "app_installations.json"), {"data": {"appInstallations": {"edges": [
+        {"node": {"id": "gid://shopify/AppInstallation/1",
+                  "app": {"id": "gid://shopify/App/1", "title": "Order Exporter",
+                          "developerName": "Unknown Dev"},
+                  "accessScopes": [{"handle": "read_orders"}, {"handle": "read_customers"}]}},
+    ]}}})
+    w(os.path.join(sh, "shop.json"), {"name": "Acme Store", "plan_name": "basic",
+                                      "myshopify_domain": "acme.myshopify.com"})
+    w(os.path.join(sh, "_collection_metadata.json"), {
+        "collected_at": t(0), "shop": "acme.myshopify.com", "api_version": "2025-01",
+        "collections": {"staff_users": {"records": None,
+                                        "status": "HTTP 403: read_users scope not granted"}},
+    })
+
     print("fixture written to %s" % root)
 
 

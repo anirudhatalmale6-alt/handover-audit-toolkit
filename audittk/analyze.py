@@ -102,6 +102,17 @@ FB_WATCH = [
     ("add", "low", "Something was added."),
 ]
 
+SHOPIFY_WATCH = [
+    ("destroy", "high", "A Shopify resource was deleted."),
+    ("delete", "high", "A Shopify resource was deleted."),
+    ("cancel", "high", "An order was cancelled."),
+    ("refund", "high", "A refund was issued."),
+    ("update", "medium", "A Shopify resource was amended."),
+    ("unpublish", "medium", "A resource was unpublished."),
+    ("publish", "low", "A resource was published."),
+    ("create", "low", "A resource was created."),
+]
+
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
 
 
@@ -455,6 +466,138 @@ def analyse_facebook(root, timeline, findings):
             })
 
 
+def analyse_shopify(root, timeline, findings):
+    d = os.path.join(root, "shopify")
+    if not os.path.isdir(d):
+        return
+
+    meta = load(os.path.join(d, "_collection_metadata.json"), {}) or {}
+
+    for ev in load(os.path.join(d, "events.json")):
+        severity, why = classify(ev.get("verb"), SHOPIFY_WATCH)
+        timeline.append({
+            "timestamp": normalise_ts(ev.get("created_at")),
+            "platform": "shopify",
+            "source": "events",
+            # author is a display name, not an email - Shopify does not put an
+            # address on an event, so this cannot be matched to a Google actor
+            # automatically.
+            "actor": ev.get("author") or "",
+            "action": "%s %s" % (ev.get("subject_type") or "", ev.get("verb") or ""),
+            "target": "%s %s" % (ev.get("subject_type") or "", ev.get("subject_id") or ""),
+            "ip": "",
+            "severity": severity,
+            "note": why,
+            "detail": (ev.get("message") or "")[:1000],
+        })
+
+    deletions = load(os.path.join(d, "events_deletions.json"))
+    if deletions:
+        by_author = {}
+        for ev in deletions:
+            by_author.setdefault(ev.get("author") or "(unknown)", []).append(ev)
+        findings.append({
+            "severity": "high", "platform": "shopify",
+            "title": "%d Shopify record(s) deleted in the window" % len(deletions),
+            "detail": "; ".join(
+                "%s: %d (%s)" % (author, len(rows),
+                                 ", ".join(sorted({r.get("_resource") or "?" for r in rows})))
+                for author, rows in sorted(by_author.items(), key=lambda kv: -len(kv[1]))),
+            "recommendation": "Deleted products and pages are not recoverable from Shopify. "
+                              "Check whether any of these exist in a theme backup, a CSV "
+                              "export or the Wayback Machine before assuming they are lost.",
+            "evidence": "shopify/events_deletions.json",
+        })
+
+    webhooks = load(os.path.join(d, "webhooks.json"))
+    if webhooks:
+        findings.append({
+            "severity": "high", "platform": "shopify",
+            "title": "%d webhook(s) registered on the store" % len(webhooks),
+            "detail": "; ".join("%s -> %s" % (wh.get("topic"), wh.get("address"))
+                                for wh in webhooks[:40]),
+            "recommendation": "A webhook sends your order and customer data to whatever URL is "
+                              "listed, forever, and no password change stops it. Check every "
+                              "destination against your list of apps you actually use. Anything "
+                              "pointing at a personal domain or an unfamiliar host should be "
+                              "deleted.",
+            "evidence": "shopify/webhooks.json",
+        })
+
+    scripts = load(os.path.join(d, "script_tags.json"))
+    if scripts:
+        findings.append({
+            "severity": "high", "platform": "shopify",
+            "title": "%d script tag(s) injected into the storefront" % len(scripts),
+            "detail": "; ".join("%s (%s)" % (s.get("src"), s.get("display_scope"))
+                                for s in scripts[:40]),
+            "recommendation": "A script tag runs JavaScript on your storefront for every "
+                              "visitor. Open each src and confirm you know what it is. This is "
+                              "the mechanism used to skim checkout details.",
+            "evidence": "shopify/script_tags.json",
+        })
+
+    apps = load(os.path.join(d, "app_installations.json"), {}) or {}
+    edges = (((apps.get("data") or {}).get("appInstallations") or {}).get("edges") or [])
+    if edges:
+        findings.append({
+            "severity": "medium", "platform": "shopify",
+            "title": "%d app(s) installed on the store" % len(edges),
+            "detail": "; ".join(
+                "%s by %s" % ((e.get("node", {}).get("app") or {}).get("title"),
+                              (e.get("node", {}).get("app") or {}).get("developerName"))
+                for e in edges[:40]),
+            "recommendation": "Each installed app holds an access token with the scopes listed "
+                              "in app_installations.json. Uninstalling the app is what revokes "
+                              "the token - removing the person who installed it does not.",
+            "evidence": "shopify/app_installations.json",
+        })
+
+    staff = load(os.path.join(d, "staff_users.json"))
+    staff_status = ((meta.get("collections") or {}).get("staff_users") or {}).get("status")
+    if staff:
+        owners = [u for u in staff if u.get("account_owner")]
+        findings.append({
+            "severity": "high" if len(owners) != 1 else "info",
+            "platform": "shopify",
+            "title": "Shopify staff: %d user(s), %d account owner(s)" % (len(staff), len(owners)),
+            "detail": "; ".join("%s %s <%s>%s" % (u.get("first_name"), u.get("last_name"),
+                                                  u.get("email"),
+                                                  " [OWNER]" if u.get("account_owner") else "")
+                                for u in staff),
+            "recommendation": "Confirm every name here is someone who should still have access.",
+            "evidence": "shopify/staff_users.json",
+        })
+    elif staff_status and staff_status != "ok":
+        findings.append({
+            "severity": "info", "platform": "shopify",
+            "title": "Shopify staff list not available on this plan",
+            "detail": "users.json returned: %s. The read_users scope is a Shopify Plus / "
+                      "organization feature." % staff_status,
+            "recommendation": "Check the staff list by hand at Settings > Users and "
+                              "permissions. This is not evidence that the staff list is empty.",
+            "evidence": "shopify/_collection_metadata.json",
+        })
+
+    # The gap that matters most on Shopify, stated whether or not anything
+    # else was found - an empty Shopify section must not read as "all clear".
+    findings.append({
+        "severity": "medium", "platform": "shopify",
+        "title": "Shopify settings changes are not covered by this export",
+        "detail": "Shopify's Event API covers only Article, Blog, Comment, CustomCollection, "
+                  "Order, Page, PriceRule and Product. Changes to settings, payouts, bank "
+                  "details, app installs and staff do not appear in it. Those live in the "
+                  "store activity log, which caps at 250 entries, cannot be exported, and is "
+                  "not available through any API.",
+        "recommendation": "Open Settings > General > Store activity log and screenshot it now, "
+                          "oldest page first. It is capped at 250 entries and rolls off as the "
+                          "store stays busy, so it is the one record here that gets worse every "
+                          "day it is left. Send me the screenshots and I will transcribe them "
+                          "into the timeline.",
+        "evidence": "shopify/_collection_metadata.json",
+    })
+
+
 def normalise_ts(value):
     """Return one sortable UTC ISO string from the shapes the sources emit.
 
@@ -596,6 +739,12 @@ def render_report(path, findings, timeline, args, stats):
       "recover for around 25 days after that, via an admin request.")
     w("- GCP Data Access logs are off by default, so reads and exports may not be recorded.")
     w("- Meta's business activity log is short retention, on the order of 90 days.")
+    w("- Shopify's Event API retains 1 year but covers only eight resource types. "
+      "Settings, payout, app and staff changes are not in it, and the store activity "
+      "log that does hold them caps at 250 entries and cannot be exported.")
+    w("- Shopify staff login history is the five most recent sessions per staff member "
+      "and is deleted with the staff member, so a removed user's login history is "
+      "already gone.")
     w("- Actions taken directly inside a third-party tool that already holds a token are "
       "logged by that tool, not by Google or Meta.")
     w("")
@@ -624,6 +773,7 @@ def main(argv=None):
     analyse_google(args.dir, watchlists, timeline, findings)
     analyse_gcp(args.dir, timeline, findings)
     analyse_facebook(args.dir, timeline, findings)
+    analyse_shopify(args.dir, timeline, findings)
 
     for row in timeline:
         row["timestamp"] = normalise_ts(row["timestamp"])

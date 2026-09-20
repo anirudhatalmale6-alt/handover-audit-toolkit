@@ -1,8 +1,12 @@
-# Handover audit toolkit — Google Workspace / GCP / Meta Business Manager
+# Handover audit toolkit — Google Workspace / GCP / Shopify / Meta Business Manager
 
-Read-only extraction of Access, Security and Activity logs from both platforms,
-plus a findings report and a SHA-256 manifest so the archive can be proved
-unaltered later.
+Read-only extraction of Access, Security and Activity logs from all four
+platforms, plus a findings report and a SHA-256 manifest so the archive can be
+proved unaltered later.
+
+See also **[REVOCATION-CHECKLIST.md](REVOCATION-CHECKLIST.md)** — what to
+actually shut off after a handover, in order. Changing passwords is the
+smallest part of it.
 
 Nothing in this toolkit writes to your tenant. There is no delete, update or
 create call anywhere in it — grep for `.delete(`, `.update(` or `.insert(` and
@@ -47,7 +51,16 @@ out/
       *_audience_sharing_requests.json
       asset_assignments.json          who holds which permission on which asset
     _collection_metadata.json
-  timeline.csv                        every event from both platforms, one sheet
+  shopify/
+    events.json                       1 year of resource history (8 types only)
+    events_deletions.json             deletions isolated, per resource type
+    webhooks.json                     where your order data is being sent
+    script_tags.json                  JavaScript injected into the storefront
+    app_installations.json            installed apps and their access scopes
+    staff_users.json                  Shopify Plus only; 403 on other plans
+    price_rules.json / shop.json
+    _collection_metadata.json         includes the coverage caveats in writing
+  timeline.csv                        every event from all platforms, one sheet
   timeline_partner.csv                filtered to the departing partner
   findings.json
   REPORT.md                           the written report
@@ -63,7 +76,7 @@ python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Python 3.9+. The Facebook extractor uses only the standard library.
+Python 3.9+. The Facebook and Shopify extractors use only the standard library.
 
 ---
 
@@ -135,7 +148,47 @@ python -m audittk.gcp_export --key sa.json --out out/gcp --days 180 \
 
 ---
 
-## 3. Meta Business Manager access
+## 3. Shopify access
+
+1. Shopify admin → **Settings → Apps and sales channels → Develop apps →
+   Create an app**. Name it `handover-audit`.
+2. **Configure Admin API scopes** — read-only throughout:
+   `read_products`, `read_orders`, `read_content`, `read_price_rules`,
+   `read_script_tags`, `read_themes`, `read_customers`.
+   Add `read_users` only if you are on Shopify Plus; on other plans the scope
+   does not exist and the staff list has to be read by hand.
+3. **Install app**, then reveal the **Admin API access token** (`shpat_...`).
+   It is shown once.
+
+```sh
+export SHOPIFY_TOKEN='shpat_...'
+python -m audittk.shopify_export --shop your-store.myshopify.com \
+    --out out/shopify --days 365
+```
+
+Revoke afterwards by deleting the custom app.
+
+**What Shopify does and does not give you.** This is the weakest audit trail of
+the three and the limits change what the report can claim:
+
+- The **Event API** retains **1 year** — longer than anything else here — but
+  covers only eight resource types: Article, Blog, Comment, CustomCollection,
+  Order, Page, PriceRule, Product. Settings changes, app installs, payout and
+  bank detail changes and staff changes are **not in it**.
+- The **store activity log** (Settings → General → Store activity log) is where
+  those settings changes live. It caps at **250 entries**, cannot be exported,
+  and no API exposes it. It must be screenshotted by hand and it rolls off as
+  the store stays busy.
+- **Staff login history** is the five most recent sessions per staff member and
+  is deleted along with the staff member — which is why a former owner's
+  activity vanishes after a handover. Capture it *before* removing them.
+- The **user management activity log** (Settings → Users → Security) does
+  record user and role changes, but it is an organization-level feature not
+  available on every plan.
+
+---
+
+## 4. Meta Business Manager access
 
 1. **business.facebook.com → Business Settings → Users → System Users → Add**.
    Name it `handover-audit`, role **Admin**.
@@ -162,7 +215,7 @@ instead.
 
 ---
 
-## 4. Report and manifest
+## 5. Report and manifest
 
 ```sh
 python -m audittk.analyze --dir out \
@@ -186,7 +239,7 @@ exit 1.
 
 ---
 
-## 5. Everything in one go
+## 6. Everything in one go
 
 ```sh
 ./run_all.sh sa.json you@yourdomain.com old.partner@yourdomain.com 2026-09-01

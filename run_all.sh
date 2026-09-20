@@ -3,9 +3,9 @@
 #
 #   ./run_all.sh sa.json you@domain.com [partner@domain.com] [YYYY-MM-DD handover]
 #
-# Set FB_TOKEN in the environment for the Facebook leg. If it is unset that
-# leg is skipped and the report says so, rather than reporting a clean
-# Facebook history that was never actually looked at.
+# Set FB_TOKEN for the Facebook leg, and SHOPIFY_SHOP + SHOPIFY_TOKEN for the
+# Shopify leg. If either is unset that leg is SKIPPED and says so loudly,
+# rather than reporting a clean history that was never actually looked at.
 
 set -e
 
@@ -30,6 +30,15 @@ echo "==> GCP"
 # A tenant with no GCP projects is normal; do not abort the whole run for it.
 python3 -m audittk.gcp_export --key "$KEY" --out "$OUT/gcp" --days "$DAYS_GOOGLE" \
     || echo "    GCP leg returned non-zero - see $OUT/gcp/_collection_metadata.json"
+
+if [ -n "$SHOPIFY_TOKEN" ] && [ -n "$SHOPIFY_SHOP" ]; then
+    echo "==> Shopify"
+    python3 -m audittk.shopify_export --shop "$SHOPIFY_SHOP" \
+        --out "$OUT/shopify" --days "${DAYS_SHOPIFY:-365}" \
+        || echo "    Shopify leg returned non-zero - see $OUT/shopify/_collection_metadata.json"
+else
+    echo "==> Shopify SKIPPED (set SHOPIFY_SHOP and SHOPIFY_TOKEN)"
+fi
 
 if [ -n "$FB_TOKEN" ]; then
     echo "==> Meta Business Manager"
